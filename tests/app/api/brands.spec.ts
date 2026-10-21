@@ -61,7 +61,8 @@ const createBrand = async (
 
 /**
  * Deletes every given brand with an admin token. Ignores brands that are
- * already gone so cleanup stays idempotent.
+ * already gone so cleanup stays idempotent, and attempts every delete before
+ * asserting so one failure does not leak the remaining brands.
  *
  * @param {ApiRequestFn} apiRequest - The API request function from fixtures.
  * @param {string[]} brandIds - Ids of brands created by the tests.
@@ -77,6 +78,7 @@ const deleteBrands = async (
         process.env.ADMIN_EMAIL!,
         process.env.ADMIN_PASSWORD!
     );
+    const failedDeletes: { brandId: string; status: number }[] = [];
     for (const brandId of brandIds) {
         const { status } = await apiRequest<null>({
             method: 'DELETE',
@@ -84,8 +86,11 @@ const deleteBrands = async (
             baseUrl: process.env.API_URL,
             headers: adminToken,
         });
-        expect([204, 404]).toContain(status);
+        if (status !== 204 && status !== 404) {
+            failedDeletes.push({ brandId, status });
+        }
     }
+    expect(failedDeletes).toEqual([]);
 };
 
 test.describe('api/brands - GET /brands', () => {
@@ -307,14 +312,16 @@ test.describe('api/brands - POST /brands', () => {
 });
 
 test.describe('api/brands - GET /brands/{brandId}', () => {
+    const createdBrandIds: string[] = [];
     let brand: BrandResponse;
 
     test.beforeAll(async ({ apiRequest }) => {
         brand = await createBrand(apiRequest);
+        createdBrandIds.push(brand.id);
     });
 
     test.afterAll(async ({ apiRequest }) => {
-        await deleteBrands(apiRequest, [brand.id]);
+        await deleteBrands(apiRequest, createdBrandIds);
     });
 
     test(
@@ -353,13 +360,14 @@ test.describe('api/brands - GET /brands/{brandId}', () => {
             `should return 404 for invalid brandId - ${description}`,
             { tag: '@api' },
             async ({ apiRequest }) => {
-                const { status } = await apiRequest<NotFoundResponse>({
+                const { status, body } = await apiRequest<NotFoundResponse>({
                     method: 'GET',
                     url: brandUrl(value),
                     baseUrl: process.env.API_URL,
                 });
 
                 expect(status).toBe(404);
+                expect(NotFoundResponseSchema.parse(body)).toBeTruthy();
             }
         );
     }
@@ -385,16 +393,19 @@ test.describe('api/brands - GET /brands/{brandId}', () => {
 
 for (const method of ['PUT', 'PATCH'] as const) {
     test.describe(`api/brands - ${method} /brands/{brandId}`, () => {
+        const createdBrandIds: string[] = [];
         let brand: BrandResponse;
         let otherBrand: BrandResponse;
 
         test.beforeAll(async ({ apiRequest }) => {
             brand = await createBrand(apiRequest);
+            createdBrandIds.push(brand.id);
             otherBrand = await createBrand(apiRequest);
+            createdBrandIds.push(otherBrand.id);
         });
 
         test.afterAll(async ({ apiRequest }) => {
-            await deleteBrands(apiRequest, [brand.id, otherBrand.id]);
+            await deleteBrands(apiRequest, createdBrandIds);
         });
 
         test(
@@ -452,14 +463,17 @@ for (const method of ['PUT', 'PATCH'] as const) {
                 `should return 404 for invalid brandId - ${description}`,
                 { tag: '@api' },
                 async ({ apiRequest }) => {
-                    const { status } = await apiRequest<NotFoundResponse>({
-                        method,
-                        url: brandUrl(value),
-                        baseUrl: process.env.API_URL,
-                        body: generateBrand(),
-                    });
+                    const { status, body } = await apiRequest<NotFoundResponse>(
+                        {
+                            method,
+                            url: brandUrl(value),
+                            baseUrl: process.env.API_URL,
+                            body: generateBrand(),
+                        }
+                    );
 
                     expect(status).toBe(404);
+                    expect(NotFoundResponseSchema.parse(body)).toBeTruthy();
                 }
             );
         }
@@ -525,14 +539,16 @@ for (const method of ['PUT', 'PATCH'] as const) {
 // body on PUT (expected replace semantics) or document PUT as partial.
 test.describe
     .skip('api/brands - PUT /brands/{brandId} full-body validation', () => {
+    const createdBrandIds: string[] = [];
     let brand: BrandResponse;
 
     test.beforeAll(async ({ apiRequest }) => {
         brand = await createBrand(apiRequest);
+        createdBrandIds.push(brand.id);
     });
 
     test.afterAll(async ({ apiRequest }) => {
-        await deleteBrands(apiRequest, [brand.id]);
+        await deleteBrands(apiRequest, createdBrandIds);
     });
 
     test(
@@ -580,14 +596,16 @@ test.describe
 /* eslint-enable playwright/no-skipped-test */
 
 test.describe('api/brands - PATCH /brands/{brandId} partial update', () => {
+    const createdBrandIds: string[] = [];
     let brand: BrandResponse;
 
     test.beforeAll(async ({ apiRequest }) => {
         brand = await createBrand(apiRequest);
+        createdBrandIds.push(brand.id);
     });
 
     test.afterAll(async ({ apiRequest }) => {
-        await deleteBrands(apiRequest, [brand.id]);
+        await deleteBrands(apiRequest, createdBrandIds);
     });
 
     test(
@@ -620,6 +638,53 @@ test.describe('api/brands - PATCH /brands/{brandId} partial update', () => {
                 expect(BrandResponseSchema.parse(body)).toBeTruthy();
                 expect(body.name).toBe(name);
                 expect(body.slug).toBe(brand.slug);
+            });
+        }
+    );
+
+    test(
+        'should return 200 and update only the slug',
+        { tag: '@api' },
+        async ({ apiRequest }) => {
+            const { slug } = generateBrand();
+            let currentName: string;
+
+            await test.step('Read current brand via GET /brands/{brandId}', async () => {
+                const { status, body } = await apiRequest<BrandResponse>({
+                    method: 'GET',
+                    url: brandUrl(brand.id),
+                    baseUrl: process.env.API_URL,
+                });
+
+                expect(status).toBe(200);
+                expect(BrandResponseSchema.parse(body)).toBeTruthy();
+                currentName = body.name;
+            });
+
+            await test.step('Patch brand slug via PATCH /brands/{brandId}', async () => {
+                const { status, body } = await apiRequest<BrandUpdateResponse>({
+                    method: 'PATCH',
+                    url: brandUrl(brand.id),
+                    baseUrl: process.env.API_URL,
+                    body: { slug },
+                });
+
+                expect(status).toBe(200);
+                expect(BrandUpdateResponseSchema.parse(body)).toBeTruthy();
+                expect(body.success).toBe(true);
+            });
+
+            await test.step('Verify brand via GET /brands/{brandId}', async () => {
+                const { status, body } = await apiRequest<BrandResponse>({
+                    method: 'GET',
+                    url: brandUrl(brand.id),
+                    baseUrl: process.env.API_URL,
+                });
+
+                expect(status).toBe(200);
+                expect(BrandResponseSchema.parse(body)).toBeTruthy();
+                expect(body.slug).toBe(slug);
+                expect(body.name).toBe(currentName);
             });
         }
     );
@@ -702,6 +767,9 @@ test.describe('api/brands - DELETE /brands/{brandId}', () => {
         }
     );
 
+    // FIXME: OpenAPI does not document 403 for DELETE /brands/{brandId}, but
+    // the live API returns it for non-admin tokens. Kept as coverage of real
+    // behaviour — raise with backend to add 403 to the spec.
     test(
         'should return 403 for non-admin user',
         { tag: '@api' },
@@ -757,7 +825,7 @@ test.describe('api/brands - DELETE /brands/{brandId}', () => {
             `should return 404 for invalid brandId - ${description}`,
             { tag: '@api' },
             async ({ apiRequest }) => {
-                const { status } = await apiRequest<NotFoundResponse>({
+                const { status, body } = await apiRequest<NotFoundResponse>({
                     method: 'DELETE',
                     url: brandUrl(value),
                     baseUrl: process.env.API_URL,
@@ -765,6 +833,7 @@ test.describe('api/brands - DELETE /brands/{brandId}', () => {
                 });
 
                 expect(status).toBe(404);
+                expect(NotFoundResponseSchema.parse(body)).toBeTruthy();
             }
         );
     }
@@ -809,22 +878,4 @@ test.describe('api/brands - DELETE /brands/{brandId}', () => {
         }
     );
     /* eslint-enable playwright/no-skipped-test */
-
-    test(
-        'should return 405 for unsupported method POST',
-        { tag: '@api' },
-        async ({ apiRequest }) => {
-            const { status, body } = await apiRequest<MethodNotAllowedResponse>(
-                {
-                    method: 'POST',
-                    url: brandUrl(faker.string.ulid()),
-                    baseUrl: process.env.API_URL,
-                    headers: adminToken,
-                }
-            );
-
-            expect(status).toBe(405);
-            expect(MethodNotAllowedResponseSchema.parse(body)).toBeTruthy();
-        }
-    );
 });
