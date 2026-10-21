@@ -28,7 +28,7 @@ export const UnauthenticatedResponseSchema = z.strictObject({
 
 /**
  * Schema for 403 Forbidden responses.
- * FIXME: shape not yet observed live — Laravel convention, unverified.
+ * Verified live on DELETE /brands/{brandId} with a non-admin token.
  */
 export const ForbiddenResponseSchema = z.strictObject({
     message: z.string(),
@@ -67,7 +67,11 @@ export const UnprocessableEntityResponseSchema = z.record(
  * or a generic message ({"message": "Duplicate Entry"}).
  */
 export const DuplicateConflictResponseSchema = z.union([
-    z.record(z.string(), z.array(z.string())),
+    z
+        .record(z.string(), z.array(z.string()))
+        .refine((errors) => Object.keys(errors).length > 0, {
+            message: 'Field-level conflict map must not be empty',
+        }),
     z.strictObject({
         message: z.string(),
     }),
