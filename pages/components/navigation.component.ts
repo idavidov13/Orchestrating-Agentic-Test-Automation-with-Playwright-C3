@@ -47,6 +47,14 @@ export class NavigationComponent {
         return this.page.getByRole('link', { name: 'Sign in' });
     }
 
+    get cartLink(): Locator {
+        return this.page.getByRole('link', { name: 'cart', exact: true });
+    }
+
+    get cartQuantity(): Locator {
+        return this.page.getByTestId('cart-quantity');
+    }
+
     /** Logged-in user dropdown toggle; shows the user's name. */
     get userMenu(): Locator {
         return this.page.getByTestId('nav-menu');
